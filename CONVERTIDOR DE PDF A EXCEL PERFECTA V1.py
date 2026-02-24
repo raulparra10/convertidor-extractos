@@ -1,105 +1,117 @@
-import streamlit as st
-import pdfplumber
+import os
 import pandas as pd
-import io
+from pdf2image import convert_from_path
+import pytesseract
+import re
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+# --- CONFIGURACIÓN ---
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+ruta_poppler = r'C:\Users\DELL Latitude 7200\Downloads\poppler-25.12.0\Library\bin'
+ruta_pdf = r"C:\Users\DELL Latitude 7200\Desktop\Extracto Proveedor Detallado Krona.pdf"
+destino = r"C:\Users\DELL Latitude 7200\Desktop\PERFECTA\RESULTADO SCRIPT PERFECTA"
+ruta_excel = os.path.join(destino, "Extracto_Krona_Conciliado_Final.xlsx")
+
+if not os.path.exists(destino): os.makedirs(destino)
 
 def limpiar_monto(valor):
-    """Limpia los valores monetarios quitando comas y convirtiéndolos a float."""
-    if pd.isna(valor) or valor == '' or valor is None:
-        return 0.0
-    valor_str = str(valor).replace(',', '').replace(' ', '').strip()
+    if not valor: return 0.0
+    limpio = str(valor).replace('.', '').replace(',', '').strip()
+    try: return float(limpio)
+    except: return 0.0
+
+def procesar_extracto_perfecta():
+    print("🔍 Analizando extracto con lógica de anclaje contable...")
     try:
-        return float(valor_str)
-    except ValueError:
-        return valor
-
-def procesar_pdf(archivo_pdf):
-    datos_totales = []
-    encabezados = None
-    
-    with pdfplumber.open(archivo_pdf) as pdf:
-        for pagina in pdf.pages:
-            tablas = pagina.extract_tables()
-            
-            for tabla in tablas:
-                if not tabla:
-                    continue
-                    
-                for fila in tabla:
-                    # Limpiamos saltos de línea y valores nulos
-                    fila_limpia = [str(c).replace('\n', ' ').strip() if c else "" for c in fila]
-                    texto_fila = " ".join(fila_limpia).lower()
-                    
-                    # 1. BUSCADOR INTELIGENTE: Identificamos la cabecera por sus palabras clave
-                    if "débito" in texto_fila and "saldo" in texto_fila:
-                        if not encabezados:
-                            encabezados = fila_limpia
-                        continue  # Saltamos la cabecera para no meterla como un dato más
-                        
-                    # 2. EXTRACCIÓN: Si ya encontramos los encabezados, empezamos a guardar los datos
-                    if encabezados:
-                        # Solo guardamos si la fila no está completamente vacía
-                        if any(celda != "" for celda in fila_limpia):
-                            # Evitamos guardar cabeceras repetidas si aparecen en la página 2, 3, etc.
-                            if "débito" not in texto_fila: 
-                                datos_totales.append(fila_limpia)
-
-    # Si no encontró nada, retorna None
-    if not datos_totales or not encabezados:
-        return None
-        
-    # 3. CUADRAR TABLA: Nos aseguramos de que todas las filas tengan la misma cantidad de columnas
-    datos_cuadrados = []
-    num_cols = len(encabezados)
-    for fila in datos_totales:
-        if len(fila) == num_cols:
-            datos_cuadrados.append(fila)
-        elif len(fila) < num_cols:
-            datos_cuadrados.append(fila + [""] * (num_cols - len(fila)))
-        else:
-            datos_cuadrados.append(fila[:num_cols])
-
-    # 4. CREAR EXCEL: Armamos el DataFrame
-    df = pd.DataFrame(datos_cuadrados, columns=encabezados)
-    
-    # Limpiamos las columnas numéricas para que Excel las reconozca como moneda
-    for col in df.columns:
-        if "débito" in col.lower() or "crédito" in col.lower() or "saldo" in col.lower():
-            df[col] = df[col].apply(limpiar_monto)
-            
-    # Generamos el archivo en memoria
-    buffer_excel = io.BytesIO()
-    with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Extracto Proveedor')
-        
-    buffer_excel.seek(0)
-    return buffer_excel
-
-# --- INTERFAZ WEB CON STREAMLIT ---
-st.set_page_config(page_title="Conversor de Extractos", page_icon="📊", layout="centered")
-
-st.title("📊 Conversor de Extractos a Excel")
-st.markdown("Sube el extracto en formato PDF generado por el sistema y obtén una tabla de Excel limpia y estructurada.")
-
-archivo_subido = st.file_uploader("Selecciona el archivo PDF", type=["pdf"])
-
-if archivo_subido is not None:
-    st.info("Procesando el documento, por favor espera...")
-    
-    try:
-        excel_generado = procesar_pdf(archivo_subido)
-        
-        if excel_generado:
-            st.success("¡Conversión exitosa!")
-            
-            st.download_button(
-                label="📥 Descargar archivo Excel",
-                data=excel_generado,
-                file_name="Extracto_Convertido.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("No se encontraron tablas estructuradas en el documento PDF.")
-            
+        paginas = convert_from_path(ruta_pdf, dpi=300, poppler_path=ruta_poppler)
     except Exception as e:
-        st.error(f"Ocurrió un error al procesar el archivo: {e}")
+        print(f"❌ Error Poppler: {e}"); return
+
+    datos_finales = []
+
+    for i, img in enumerate(paginas):
+        texto = pytesseract.image_to_string(img, lang='spa', config='--psm 6')
+        print(f"Procesando página {i+1}...")
+        
+        for linea in texto.split('\n'):
+            linea = linea.strip()
+            if not linea or any(x in linea for x in ["Comprobante", "Totales", "PERFECTA"]): continue
+            
+            # 1. Extraer los últimos 3 bloques numéricos (Débito, Crédito, Saldo)
+            partes = linea.split()
+            if len(partes) < 4: continue
+            
+            saldo = partes[-1]
+            credito = partes[-2]
+            debito = partes[-3]
+            
+            # 2. Extraer Comprobante (primer elemento)
+            comprobante = partes[0]
+            
+            # 3. Identificar Fechas (DD-MM-YY)
+            fechas = re.findall(r'\d{2}-\d{2}-\d{2}', linea)
+            f_transac = fechas[0] if len(fechas) > 0 else ""
+            f_pago = fechas[1] if len(fechas) > 1 else ""
+            
+            # 4. Identificar Asiento/Periodo (Ej: 843/202208)
+            asiento = re.search(r'\d+/\d{6}', linea)
+            asiento_val = asiento.group(0) if asiento else ""
+            
+            # 5. Capturar Nro. Planilla (el cero después de la fecha transac)
+            # Buscamos el patrón: Fecha + 0
+            nro_planilla = "0" if f_transac + " 0" in linea else ""
+            
+            # 6. Capturar Orden de Pago (números de 3-4 dígitos que no sean años)
+            op_match = re.search(r'\s(\d{3,4})\s', linea)
+            orden_pago = op_match.group(1) if op_match else ""
+
+            # 7. El resto del texto entre el Asiento y el Débito es el Concepto
+            concepto_match = re.search(f"{asiento_val or f_pago or nro_planilla}(.*?){debito}", linea)
+            concepto = concepto_match.group(1).strip() if concepto_match else ""
+
+            datos_finales.append({
+                "Comprobante": comprobante,
+                "Fecha Transac.": f_transac,
+                "Nro. Planilla": nro_planilla,
+                "Tipo Planilla": "",
+                "Orden de Pago": orden_pago,
+                "Fecha de Pago": f_pago,
+                "Asiento/Periodo": asiento_val,
+                "Descripción Concepto": concepto,
+                "Débito": limpiar_monto(debito),
+                "Crédito": limpiar_monto(credito),
+                "Saldo": limpiar_monto(saldo)
+            })
+
+    df = pd.DataFrame(datos_finales)
+    
+    # --- DISEÑO CORPORATIVO ---
+    with pd.ExcelWriter(ruta_excel, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Extracto Krona')
+        ws = writer.sheets['Extracto Krona']
+        
+        # Estilos BMW/Perfecta
+        header_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = border
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            for cell in row:
+                cell.border = border
+                if cell.column_letter in ['I', 'J', 'K']:
+                    cell.number_format = '#,##0'
+                    cell.alignment = Alignment(horizontal="right")
+
+        anchos = {'A': 20, 'B': 15, 'C': 12, 'D': 12, 'E': 15, 'F': 15, 'G': 18, 'H': 50, 'I': 15, 'J': 15, 'K': 15}
+        for col, ancho in anchos.items(): ws.column_dimensions[col].width = ancho
+
+    print(f"\n✅ Proceso exitoso. Archivo generado: {ruta_excel}")
+
+if __name__ == "__main__":
+    procesar_extracto_perfecta()
