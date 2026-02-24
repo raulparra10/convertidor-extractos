@@ -13,7 +13,6 @@ def limpiar_monto(valor):
     except: return 0.0
 
 def procesar_contable_avanzado(archivo_bytes):
-    # En la nube no usamos rutas C:\ ni definimos poppler_path
     try:
         paginas = convert_from_bytes(archivo_bytes, dpi=300)
     except Exception as e:
@@ -21,7 +20,13 @@ def procesar_contable_avanzado(archivo_bytes):
         return None
 
     datos_finales = []
-    patron = re.compile(r'(\S+)\s+(.*?)\s+(\d{2}-\d{2}-\d{2})\s+(0)\s+(\d{1,4})\s+(\d{2}-\d{2}-\d{2})\s+(\d+/\d{6})\s+(.*?)\s+([-]?\d[\d.,]*)\s+([-]?\d[\d.,]*)\s+([-]?\d[\d.,]*)$')
+    
+    # 1. Patrón Base: Busca los extremos fijos de la tabla (Comprobante, Fechas, Nro y los 3 montos finales)
+    # Permite que el medio sea dinámico (.*?)
+    patron_base = re.compile(r'(\S+)\s+(.*?)\s+(\d{2}-\d{2}-\d{2})\s+(\d+)\s+(.*?)\s+([-]?\s*\d[\d.,]*)\s+([-]?\s*\d[\d.,]*)\s+([-]?\s*\d[\d.,]*)$')
+    
+    # 2. Patrón Medio: Busca los datos opcionales en el centro si es que existen
+    patron_medio = re.compile(r'(?:(\d{1,6})\s+)?(?:(\d{2}-\d{2}-\d{2})\s+)?(?:(\d+/\d{6})\s+)?(.*)')
 
     progreso = st.progress(0)
     total_paginas = len(paginas)
@@ -32,23 +37,30 @@ def procesar_contable_avanzado(archivo_bytes):
         
         for linea in texto.split('\n'):
             linea = linea.strip()
-            if not linea or "Comprobante" in linea or "Totales" in linea: 
+            # Ignoramos la cabecera y la línea de saldo inicial
+            if not linea or "Comprobante" in linea or "Totales" in linea or "Saldo inicial" in linea: 
                 continue
             
-            match = patron.search(linea)
+            match = patron_base.search(linea)
             if match:
+                # El grupo 5 contiene todo el texto del medio (Orden, Fecha de Pago, Asiento, Concepto)
+                medio = match.group(5).strip()
+                
+                # Le pasamos el escáner dinámico a la parte del medio
+                match_m = patron_medio.match(medio)
+                
                 datos_finales.append({
                     "Comprobante": match.group(1),
                     "Fecha Transac.": match.group(3),
                     "Nro. Planilla": match.group(4),
                     "Tipo Planilla": "",
-                    "Orden de Pago": match.group(5),
-                    "Fecha de Pago": match.group(6),
-                    "Asiento/Periodo": match.group(7),
-                    "Descripción Concepto": match.group(8).strip(),
-                    "Débito": limpiar_monto(match.group(9)),
-                    "Crédito": limpiar_monto(match.group(10)),
-                    "Saldo": limpiar_monto(match.group(11))
+                    "Orden de Pago": match_m.group(1) if match_m.group(1) else "",
+                    "Fecha de Pago": match_m.group(2) if match_m.group(2) else "",
+                    "Asiento/Periodo": match_m.group(3) if match_m.group(3) else "",
+                    "Descripción Concepto": match_m.group(4).strip() if match_m.group(4) else "",
+                    "Débito": limpiar_monto(match.group(6)),
+                    "Crédito": limpiar_monto(match.group(7)),
+                    "Saldo": limpiar_monto(match.group(8))
                 })
 
     if not datos_finales:
@@ -75,7 +87,7 @@ def procesar_contable_avanzado(archivo_bytes):
             for cell in row:
                 cell.border = border
                 if cell.column_letter in ['I', 'J', 'K']: 
-                    cell.number_format = '#,##0'
+                    cell.number_format = '#,##0.00'
                     cell.alignment = Alignment(horizontal="right")
                 else:
                     cell.alignment = Alignment(horizontal="left")
@@ -83,6 +95,9 @@ def procesar_contable_avanzado(archivo_bytes):
         anchos = {'A': 20, 'B': 15, 'C': 12, 'D': 12, 'E': 15, 'F': 15, 'G': 18, 'H': 55, 'I': 15, 'J': 15, 'K': 15}
         for col, ancho in anchos.items():
             ws.column_dimensions[col].width = ancho
+            
+        ws.auto_filter.ref = ws.dimensions
+        ws.freeze_panes = "A2"
 
     return output.getvalue()
 
@@ -107,4 +122,4 @@ if archivo_subido:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("❌ No se detectaron filas válidas con el patrón establecido.")
+                st.error("❌ No se detectaron filas válidas. Verifica la calidad del PDF.")
