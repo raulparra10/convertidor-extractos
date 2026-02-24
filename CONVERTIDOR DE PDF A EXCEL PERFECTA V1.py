@@ -14,64 +14,60 @@ def limpiar_monto(valor):
         return valor
 
 def procesar_pdf(archivo_pdf):
-    """Extrae las tablas del PDF, las limpia y devuelve un archivo Excel en memoria."""
     datos_totales = []
     encabezados = None
     
     with pdfplumber.open(archivo_pdf) as pdf:
         for pagina in pdf.pages:
-            # Extraer TODAS las tablas de la página
             tablas = pagina.extract_tables()
             
             for tabla in tablas:
-                # Ignorar tablas vacías
-                if not tabla or len(tabla) == 0:
+                if not tabla:
                     continue
-                
-                # EL TRUCO: Solo tomar en cuenta las tablas grandes (más de 6 columnas)
-                # Esto evita capturar los recuadros pequeños de "Hora", "Usuario", etc.
-                if len(tabla[0]) > 6:
-                    if not encabezados:
-                        # Guardar la cabecera la primera vez
-                        encabezados = tabla[0]
-                        datos_totales.extend(tabla[1:])
-                    else:
-                        # Si el encabezado se repite en la siguiente página, lo saltamos
-                        if tabla[0][0] == encabezados[0]:
-                            datos_totales.extend(tabla[1:])
-                        else:
-                            datos_totales.extend(tabla)
-    
+                    
+                for fila in tabla:
+                    # Limpiamos saltos de línea y valores nulos
+                    fila_limpia = [str(c).replace('\n', ' ').strip() if c else "" for c in fila]
+                    texto_fila = " ".join(fila_limpia).lower()
+                    
+                    # 1. BUSCADOR INTELIGENTE: Identificamos la cabecera por sus palabras clave
+                    if "débito" in texto_fila and "saldo" in texto_fila:
+                        if not encabezados:
+                            encabezados = fila_limpia
+                        continue  # Saltamos la cabecera para no meterla como un dato más
+                        
+                    # 2. EXTRACCIÓN: Si ya encontramos los encabezados, empezamos a guardar los datos
+                    if encabezados:
+                        # Solo guardamos si la fila no está completamente vacía
+                        if any(celda != "" for celda in fila_limpia):
+                            # Evitamos guardar cabeceras repetidas si aparecen en la página 2, 3, etc.
+                            if "débito" not in texto_fila: 
+                                datos_totales.append(fila_limpia)
+
+    # Si no encontró nada, retorna None
     if not datos_totales or not encabezados:
         return None
         
-    # Limpiar encabezados (eliminar saltos de línea)
-    encabezados = [str(col).replace('\n', ' ').strip() if col else f"Col_Vacia_{i}" 
-                   for i, col in enumerate(encabezados)]
-    
-    # Igualar el tamaño de todas las filas para que Pandas no falle
+    # 3. CUADRAR TABLA: Nos aseguramos de que todas las filas tengan la misma cantidad de columnas
     datos_cuadrados = []
+    num_cols = len(encabezados)
     for fila in datos_totales:
-        if len(fila) == len(encabezados):
+        if len(fila) == num_cols:
             datos_cuadrados.append(fila)
-        elif len(fila) < len(encabezados):
-            # Rellenar con espacios vacíos si la fila es más corta
-            datos_cuadrados.append(fila + [None] * (len(encabezados) - len(fila)))
+        elif len(fila) < num_cols:
+            datos_cuadrados.append(fila + [""] * (num_cols - len(fila)))
         else:
-            # Recortar si la fila es más larga
-            datos_cuadrados.append(fila[:len(encabezados)])
+            datos_cuadrados.append(fila[:num_cols])
 
-    # Crear el DataFrame
+    # 4. CREAR EXCEL: Armamos el DataFrame
     df = pd.DataFrame(datos_cuadrados, columns=encabezados)
-    df = df.replace('\n', ' ', regex=True)
     
-    # Aplicar formato financiero
-    columnas_moneda = ['Débito', 'Crédito', 'Saldo']
-    for col in columnas_moneda:
-        if col in df.columns:
+    # Limpiamos las columnas numéricas para que Excel las reconozca como moneda
+    for col in df.columns:
+        if "débito" in col.lower() or "crédito" in col.lower() or "saldo" in col.lower():
             df[col] = df[col].apply(limpiar_monto)
             
-    # Generar el Excel
+    # Generamos el archivo en memoria
     buffer_excel = io.BytesIO()
     with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Extracto Proveedor')
@@ -80,7 +76,6 @@ def procesar_pdf(archivo_pdf):
     return buffer_excel
 
 # --- INTERFAZ WEB CON STREAMLIT ---
-
 st.set_page_config(page_title="Conversor de Extractos", page_icon="📊", layout="centered")
 
 st.title("📊 Conversor de Extractos a Excel")
