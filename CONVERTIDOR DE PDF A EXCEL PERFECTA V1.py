@@ -2,119 +2,104 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import io
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 def limpiar_monto(valor):
-    """Convierte texto de moneda a número float manejando comas y paréntesis."""
+    """Limpia los valores monetarios quitando comas y convirtiéndolos a float."""
     if pd.isna(valor) or valor == '' or valor is None:
         return 0.0
-    # Eliminar comas de miles y espacios
-    s = str(valor).replace(',', '').replace(' ', '').strip()
-    # Manejar saldos negativos representados con signo menos
+    valor_str = str(valor).replace(',', '').replace(' ', '').strip()
     try:
-        return float(s)
+        return float(valor_str)
     except ValueError:
-        return 0.0
+        return valor
 
 def procesar_pdf(archivo_pdf):
-    todas_las_filas = []
+    datos_totales = []
     encabezados = None
     
     with pdfplumber.open(archivo_pdf) as pdf:
         for pagina in pdf.pages:
             tablas = pagina.extract_tables()
+            
             for tabla in tablas:
-                if not tabla: continue
-                
+                if not tabla:
+                    continue
+                    
                 for fila in tabla:
-                    # Limpiar ruidos y saltos de línea en cada celda
+                    # Limpiamos saltos de línea y valores nulos
                     fila_limpia = [str(c).replace('\n', ' ').strip() if c else "" for c in fila]
                     texto_fila = " ".join(fila_limpia).lower()
                     
-                    # 1. IDENTIFICAR CABECERA: Buscamos las columnas clave del extracto
+                    # 1. BUSCADOR INTELIGENTE: Identificamos la cabecera por sus palabras clave
                     if "débito" in texto_fila and "saldo" in texto_fila:
                         if not encabezados:
                             encabezados = fila_limpia
-                        continue 
-                    
-                    # 2. CAPTURAR DATOS: Si ya tenemos cabecera, guardamos la fila
+                        continue  # Saltamos la cabecera para no meterla como un dato más
+                        
+                    # 2. EXTRACCIÓN: Si ya encontramos los encabezados, empezamos a guardar los datos
                     if encabezados:
-                        # Omitimos filas vacías, el "Saldo inicial" o repeticiones de cabecera
-                        if any(fila_limpia) and "saldo inicial" not in texto_fila and "débito" not in texto_fila:
-                            # Aseguramos que la fila tenga el mismo largo que el encabezado
-                            if len(fila_limpia) == len(encabezados):
-                                todas_las_filas.append(fila_limpia)
-                            elif len(fila_limpia) > len(encabezados):
-                                todas_las_filas.append(fila_limpia[:len(encabezados)])
-                            else:
-                                todas_las_filas.append(fila_limpia + [""] * (len(encabezados) - len(fila_limpia)))
+                        # Solo guardamos si la fila no está completamente vacía
+                        if any(celda != "" for celda in fila_limpia):
+                            # Evitamos guardar cabeceras repetidas si aparecen en la página 2, 3, etc.
+                            if "débito" not in texto_fila: 
+                                datos_totales.append(fila_limpia)
 
-    if not todas_las_filas: return None
+    # Si no encontró nada, retorna None
+    if not datos_totales or not encabezados:
+        return None
+        
+    # 3. CUADRAR TABLA: Nos aseguramos de que todas las filas tengan la misma cantidad de columnas
+    datos_cuadrados = []
+    num_cols = len(encabezados)
+    for fila in datos_totales:
+        if len(fila) == num_cols:
+            datos_cuadrados.append(fila)
+        elif len(fila) < num_cols:
+            datos_cuadrados.append(fila + [""] * (num_cols - len(fila)))
+        else:
+            datos_cuadrados.append(fila[:num_cols])
 
-    # Crear DataFrame
-    df = pd.DataFrame(todas_las_filas, columns=encabezados)
+    # 4. CREAR EXCEL: Armamos el DataFrame
+    df = pd.DataFrame(datos_cuadrados, columns=encabezados)
     
-    # Limpiar columnas financieras (Débito, Crédito, Saldo)
-    cols_financieras = [c for c in df.columns if any(k in c.lower() for k in ["débito", "crédito", "saldo"])]
-    for col in cols_financieras:
-        df[col] = df[col].apply(limpiar_monto)
-
-    # GENERACIÓN DE EXCEL CON ESTILO CORPORATIVO
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Extracto Detallado')
+    # Limpiamos las columnas numéricas para que Excel las reconozca como moneda
+    for col in df.columns:
+        if "débito" in col.lower() or "crédito" in col.lower() or "saldo" in col.lower():
+            df[col] = df[col].apply(limpiar_monto)
+            
+    # Generamos el archivo en memoria
+    buffer_excel = io.BytesIO()
+    with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Extracto Proveedor')
         
-        wb = writer.book
-        ws = writer.sheets['Extracto Detallado']
-        
-        # Estilos: Azul Oscuro y Blanco para encabezados
-        header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-        header_font = Font(color="FFFFFF", bold=True)
-        center_alig = Alignment(horizontal="center", vertical="center")
-        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    buffer_excel.seek(0)
+    return buffer_excel
 
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center_alig
-            cell.border = border
+# --- INTERFAZ WEB CON STREAMLIT ---
+st.set_page_config(page_title="Conversor de Extractos", page_icon="📊", layout="centered")
 
-        # Filtros, Inmovilizar panel y Formato Numérico
-        ws.auto_filter.ref = ws.dimensions
-        ws.freeze_panes = "A2"
-        
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-            for cell in row:
-                cell.border = border
-                # Aplicar formato contable a las columnas de dinero
-                if ws.cell(row=1, column=cell.column).value in cols_financieras:
-                    cell.number_format = '#,##0'
-                    cell.alignment = Alignment(horizontal="right")
-
-        # Ajuste automático de columnas
-        for col in ws.columns:
-            max_length = max(len(str(cell.value)) for cell in col)
-            ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
-
-    return output.getvalue()
-
-# INTERFAZ STREAMLIT
-st.set_page_config(page_title="Convertidor Perfecta", layout="centered")
 st.title("📊 Conversor de Extractos a Excel")
-st.markdown("Herramienta optimizada para reportes de **Perfecta Automotores S.A.**")
+st.markdown("Sube el extracto en formato PDF generado por el sistema y obtén una tabla de Excel limpia y estructurada.")
 
-archivo = st.file_uploader("Sube el PDF del Extracto", type=["pdf"])
+archivo_subido = st.file_uploader("Selecciona el archivo PDF", type=["pdf"])
 
-if archivo:
-    with st.spinner("Estructurando datos..."):
-        resultado = procesar_pdf(archivo)
-        if resultado:
-            st.success("¡Tabla generada con éxito!")
+if archivo_subido is not None:
+    st.info("Procesando el documento, por favor espera...")
+    
+    try:
+        excel_generado = procesar_pdf(archivo_subido)
+        
+        if excel_generado:
+            st.success("¡Conversión exitosa!")
+            
             st.download_button(
-                label="📥 Descargar Excel Profesional",
-                data=resultado,
-                file_name="Extracto_Krona_Procesado.xlsx",
+                label="📥 Descargar archivo Excel",
+                data=excel_generado,
+                file_name="Extracto_Convertido.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("No se detectó la tabla. Asegúrate de que el PDF contiene las columnas Débito/Crédito.")
+            st.warning("No se encontraron tablas estructuradas en el documento PDF.")
+            
+    except Exception as e:
+        st.error(f"Ocurrió un error al procesar el archivo: {e}")
