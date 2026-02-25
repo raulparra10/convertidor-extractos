@@ -21,12 +21,11 @@ def procesar_contable_avanzado(archivo_bytes):
 
     datos_finales = []
     
-    # 1. Patrón Base: Busca los extremos fijos de la tabla (Comprobante, Fechas, Nro y los 3 montos finales)
-    # Permite que el medio sea dinámico (.*?)
+    # 1. Patrón Base: Busca los extremos (Comprobante al inicio, y los 3 montos al final)
     patron_base = re.compile(r'(\S+)\s+(.*?)\s+(\d{2}-\d{2}-\d{2})\s+(\d+)\s+(.*?)\s+([-]?\s*\d[\d.,]*)\s+([-]?\s*\d[\d.,]*)\s+([-]?\s*\d[\d.,]*)$')
     
-    # 2. Patrón Medio: Busca los datos opcionales en el centro si es que existen
-    patron_medio = re.compile(r'(?:(\d{1,6})\s+)?(?:(\d{2}-\d{2}-\d{2})\s+)?(?:(\d+/\d{6})\s+)?(.*)')
+    # 2. Patrón Medio CORREGIDO: Ahora acepta comas y puntos en la Orden de Pago ([\d.,]+)
+    patron_medio = re.compile(r'^(?:([\d.,]+)\s+)?(?:(\d{2}-\d{2}-\d{2})\s+)?(?:(\d+/\d{6})\s+)?(.*)$')
 
     progreso = st.progress(0)
     total_paginas = len(paginas)
@@ -37,23 +36,19 @@ def procesar_contable_avanzado(archivo_bytes):
         
         for linea in texto.split('\n'):
             linea = linea.strip()
-            # Ignoramos la cabecera y la línea de saldo inicial
             if not linea or "Comprobante" in linea or "Totales" in linea or "Saldo inicial" in linea: 
                 continue
             
             match = patron_base.search(linea)
             if match:
-                # El grupo 5 contiene todo el texto del medio (Orden, Fecha de Pago, Asiento, Concepto)
                 medio = match.group(5).strip()
-                
-                # Le pasamos el escáner dinámico a la parte del medio
                 match_m = patron_medio.match(medio)
                 
                 datos_finales.append({
                     "Comprobante": match.group(1),
                     "Fecha Transac.": match.group(3),
                     "Nro. Planilla": match.group(4),
-                    "Tipo Planilla": "",
+                    "Tipo Planilla": "", # Se mantiene vacío intencionalmente como columna separadora
                     "Orden de Pago": match_m.group(1) if match_m.group(1) else "",
                     "Fecha de Pago": match_m.group(2) if match_m.group(2) else "",
                     "Asiento/Periodo": match_m.group(3) if match_m.group(3) else "",
